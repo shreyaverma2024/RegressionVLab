@@ -9,6 +9,7 @@ from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.metrics import mean_squared_error, r2_score
 
+from modules.datasets import DATASETS, load_dataset
 from modules.quiz_data import PRETEST, POSTTEST
 
 
@@ -287,7 +288,7 @@ if section == "Aim":
 
     st.markdown("""
     - Understand the working of three regression models.
-    - Train models using generated datasets.
+    - Train models using generated and curated offline datasets.
     - Evaluate models using MSE and R² score.
     - Visualize fitted curves.
     - Investigate underfitting and overfitting.
@@ -394,15 +395,22 @@ elif section == "Procedure":
 
     st.markdown("""
     1. Open the Simulation section.
-    2. Select a data pattern: Linear, Curved, or S-shaped.
-    3. Set the number of samples and noise level.
+    2. Choose a dataset in **Experiment Settings**: Synthetic, Salary vs
+       Years of Experience, Study Hours vs Exam Score, or Diabetes BMI vs
+       Disease Progression. Read its description, units, and source.
+    3. For **Synthetic** only, select Linear, Curved, or S-shaped and set
+       the number of samples and noise level. Real datasets use all their
+       original rows without added noise or generated samples.
     4. Select a polynomial degree.
     5. Set the Ridge regularization parameter alpha.
     6. Choose the testing-data percentage.
-    7. Click **Run Experiment**.
+    7. Results update automatically when the dataset or settings change.
+       Click **Run Experiment** to rerun the current experiment.
     8. Inspect the fitted curves and evaluation metrics.
     9. Compare training and testing errors for each model.
-    10. Repeat with different settings to observe model behavior.
+    10. Repeat with different settings and datasets. Diabetes uses only
+        standardized BMI to predict quantitative disease progression one
+        year after baseline; BMI alone is not expected to give a strong fit.
     """)
 
 
@@ -423,25 +431,53 @@ elif section == "Simulation":
 
         st.subheader("Experiment Settings")
 
-        pattern = st.selectbox(
-            "Data Pattern",
-            ["Linear", "Curved", "S-shaped"]
+        dataset_name = st.selectbox(
+            "Dataset",
+            list(DATASETS),
+            key="dataset_selection"
         )
 
-        n_samples = st.slider(
-            "Number of Samples",
-            min_value=50,
-            max_value=300,
-            value=120,
-            step=10
-        )
+        pattern = n_samples = noise = None
 
-        noise = st.slider(
-            "Noise Level",
-            min_value=0,
-            max_value=50,
-            value=15
-        )
+        if dataset_name == "Synthetic":
+            # Keep these preferences even while their widgets are hidden.
+            synthetic_settings = st.session_state.get(
+                "synthetic_settings",
+                {"pattern": "Linear", "n_samples": 120, "noise": 15}
+            )
+            for setting, value in synthetic_settings.items():
+                widget_key = f"synthetic_{setting}"
+                if widget_key not in st.session_state:
+                    st.session_state[widget_key] = value
+
+            patterns = ["Linear", "Curved", "S-shaped"]
+
+            pattern = st.selectbox(
+                "Data Pattern",
+                patterns,
+                key="synthetic_pattern"
+            )
+
+            n_samples = st.slider(
+                "Number of Samples",
+                min_value=50,
+                max_value=300,
+                step=10,
+                key="synthetic_n_samples"
+            )
+
+            noise = st.slider(
+                "Noise Level",
+                min_value=0,
+                max_value=50,
+                key="synthetic_noise"
+            )
+
+            st.session_state["synthetic_settings"] = {
+                "pattern": pattern,
+                "n_samples": n_samples,
+                "noise": noise
+            }
 
         degree = st.slider(
             "Polynomial Degree",
@@ -472,6 +508,7 @@ elif section == "Simulation":
         )
 
     current_settings = {
+        "dataset": dataset_name,
         "pattern": pattern,
         "n_samples": n_samples,
         "noise": noise,
@@ -487,11 +524,18 @@ elif section == "Simulation":
         or st.session_state.get("regression_settings") != current_settings
     ):
 
-        X, y = generate_dataset(
-            n_samples=n_samples,
-            noise=noise,
-            pattern=pattern
-        )
+        if dataset_name == "Synthetic":
+            X, y = generate_dataset(
+                n_samples=n_samples,
+                noise=noise,
+                pattern=pattern
+            )
+            plot_title = f"Regression Models — {pattern} Synthetic Dataset"
+        else:
+            X, y = load_dataset(dataset_name)
+            plot_title = f"Regression Models — {dataset_name}"
+
+        dataset_info = DATASETS[dataset_name]
 
         X_train, X_test, y_train, y_test = train_test_split(
             X,
@@ -527,6 +571,10 @@ elif section == "Simulation":
         st.session_state["regression_results"] = results
 
         st.session_state["regression_data"] = {
+            "dataset": dataset_name,
+            "x_label": dataset_info["x_label"],
+            "y_label": dataset_info["y_label"],
+            "plot_title": plot_title,
             "X": X,
             "y": y,
             "X_train": X_train,
@@ -539,6 +587,23 @@ elif section == "Simulation":
 
     results = st.session_state["regression_results"]
     data = st.session_state["regression_data"]
+
+    dataset_info = DATASETS[dataset_name]
+    st.subheader(f"Dataset: {dataset_name}")
+    st.write(dataset_info["description"])
+    st.caption(
+        f"{len(data['y'])} samples | "
+        f"X: {data['x_label']} | Y: {data['y_label']}"
+    )
+    if dataset_name != "Synthetic":
+        st.caption(
+            "All original rows are loaded offline and split into training "
+            "and testing data. No samples are generated and no noise is added."
+        )
+        st.markdown(
+            f"Source: [{dataset_info['source_name']}]"
+            f"({dataset_info['source_url']})"
+        )
 
     # --------------------------------------------------
     # FITTED CURVE GRAPH
@@ -580,9 +645,9 @@ elif section == "Simulation":
             linewidth=2
         )
 
-    ax.set_xlabel("Input (X)")
-    ax.set_ylabel("Target (Y)")
-    ax.set_title(f"Regression Models — {pattern} Dataset")
+    ax.set_xlabel(data["x_label"])
+    ax.set_ylabel(data["y_label"])
+    ax.set_title(data["plot_title"])
     ax.legend()
     ax.grid(True, alpha=0.25)
 
