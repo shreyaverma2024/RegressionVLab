@@ -8,15 +8,30 @@ from sklearn.model_selection import train_test_split
 from streamlit.testing.v1 import AppTest
 
 from modules.datasets import DATASETS, load_dataset
+from modules.experiment_guide import CONTROL_LABELS
 
 
 APP_PATH = Path(__file__).resolve().parent.parent / "app.py"
 METRICS = ["Train MSE", "Test MSE", "Train R²", "Test R²"]
-SYNTHETIC_CONTROLS = {"Data Pattern", "Number of Samples", "Noise Level"}
+SYNTHETIC_CONTROLS = {"Data Pattern", CONTROL_LABELS["Number of Samples"], CONTROL_LABELS["Noise Level"]}
+EXPECTED_PRESETS = {
+    "Linear relationship": {
+        "dataset": "Synthetic", "pattern": "Linear", "n_samples": 200,
+        "noise": 5, "degree": 3, "alpha": 1.0, "test_size": 20
+    },
+    "Curved relationship": {
+        "dataset": "Synthetic", "pattern": "Curved", "n_samples": 200,
+        "noise": 5, "degree": 2, "alpha": 1.0, "test_size": 20
+    },
+    "Overfitting and regularization": {
+        "dataset": "Synthetic", "pattern": "Curved", "n_samples": 50,
+        "noise": 50, "degree": 12, "alpha": 10.0, "test_size": 40
+    }
+}
 
 
 def sidebar_widget(app, kind, label):
-    return next(widget for widget in getattr(app.sidebar, kind) if widget.label == label)
+    return next(widget for widget in getattr(app.sidebar, kind) if widget.label == CONTROL_LABELS.get(label, label))
 
 
 @pytest.fixture
@@ -78,6 +93,124 @@ def assert_current_results(app, plots, name):
     assert displayed["Model"].tolist() == list(results)
     for metric in METRICS:
         np.testing.assert_allclose(displayed[metric], [r[metric] for r in results.values()])
+
+
+def assert_synthetic_settings(app, plots, expected):
+    assert_current_results(app, plots, "Synthetic")
+    assert app.session_state["regression_settings"] == expected
+    assert app.session_state["synthetic_settings"] == {
+        key: expected[key] for key in ["pattern", "n_samples", "noise"]
+    }
+    controls = [
+        ("selectbox", "Dataset", "dataset"),
+        ("selectbox", "Data Pattern", "pattern"),
+        ("slider", "Number of Samples", "n_samples"),
+        ("slider", "Noise Level", "noise"),
+        ("slider", "Polynomial Degree", "degree"),
+        ("slider", "Ridge Alpha", "alpha"),
+        ("slider", "Testing Data (%)", "test_size")
+    ]
+    for kind, label, setting in controls:
+        assert sidebar_widget(app, kind, label).value == expected[setting]
+
+    results = app.session_state["regression_results"]
+    for name in ["Polynomial Regression", "Ridge Regression"]:
+        assert results[name]["model"].named_steps["poly"].degree == expected["degree"]
+    assert results["Ridge Regression"]["model"].named_steps["regressor"].alpha == expected["alpha"]
+
+    rng = np.random.default_rng(42)
+    X = rng.uniform(-3, 3, expected["n_samples"])
+    if expected["pattern"] == "Linear":
+        y = 4 * X + 5
+    elif expected["pattern"] == "Curved":
+        y = 2 * X ** 2 + 3 * X + 5
+    else:
+        y = 8 * np.sin(X) + 2 * X + 5
+    y += rng.normal(0, expected["noise"] / 10, expected["n_samples"])
+    np.testing.assert_array_equal(app.session_state["regression_data"]["X"], X.reshape(-1, 1))
+    np.testing.assert_array_equal(app.session_state["regression_data"]["y"], y)
+
+
+@pytest.mark.parametrize("starting_dataset", list(DATASETS))
+@pytest.mark.parametrize("preset_name,expected", EXPECTED_PRESETS.items())
+def test_presets_apply_all_settings_from_any_dataset(
+    simulation, starting_dataset, preset_name, expected
+):
+    app, plots = simulation
+    sidebar_widget(app, "selectbox", "Dataset").select(starting_dataset).run()
+    previous_results = app.session_state["regression_results"]
+    previous_data = app.session_state["regression_data"]
+    previous_settings = app.session_state["regression_settings"].copy()
+    previous_synthetic = app.session_state["synthetic_settings"].copy()
+
+    # Selecting only previews the case; even a real dataset must stay untouched.
+    sidebar_widget(app, "selectbox", "Demonstration Preset").select(preset_name).run()
+    assert not app.exception
+    assert app.session_state["regression_results"] is previous_results
+    assert app.session_state["regression_data"] is previous_data
+    assert app.session_state["regression_settings"] == previous_settings
+    assert app.session_state["synthetic_settings"] == previous_synthetic
+    assert sidebar_widget(app, "selectbox", "Dataset").value == starting_dataset
+
+    sidebar_widget(app, "button", "Apply Preset").click().run()
+    assert_synthetic_settings(app, plots, expected)
+    assert app.session_state["regression_results"] is not previous_results
+    assert app.session_state["regression_data"] is not previous_data
+
+
+@pytest.mark.parametrize("preset_name,expected", EXPECTED_PRESETS.items())
+def test_preset_manual_edits_persist_until_explicit_reapplication(
+    simulation, preset_name, expected
+):
+    app, plots = simulation
+    sidebar_widget(app, "selectbox", "Demonstration Preset").select(preset_name).run()
+    sidebar_widget(app, "button", "Apply Preset").click().run()
+    assert_synthetic_settings(app, plots, expected)
+    preset_results = app.session_state["regression_results"]
+
+    edited = {
+        "dataset": "Synthetic", "pattern": "S-shaped", "n_samples": 160,
+        "noise": 17, "degree": 4, "alpha": 2.0, "test_size": 30
+    }
+    sidebar_widget(app, "selectbox", "Data Pattern").select(edited["pattern"])
+    for label, setting in [
+        ("Number of Samples", "n_samples"), ("Noise Level", "noise"),
+        ("Polynomial Degree", "degree"), ("Ridge Alpha", "alpha"),
+        ("Testing Data (%)", "test_size")
+    ]:
+        sidebar_widget(app, "slider", label).set_value(edited[setting])
+    app.run()
+    assert_synthetic_settings(app, plots, edited)
+    edited_results = app.session_state["regression_results"]
+    assert edited_results is not preset_results
+
+    app.run()
+    assert_synthetic_settings(app, plots, edited)
+    assert app.session_state["regression_results"] is edited_results
+    other_preset = next(name for name in EXPECTED_PRESETS if name != preset_name)
+    sidebar_widget(app, "selectbox", "Demonstration Preset").select(other_preset).run()
+    assert_synthetic_settings(app, plots, edited)
+    assert app.session_state["regression_results"] is edited_results
+    sidebar_widget(app, "selectbox", "Demonstration Preset").select(preset_name).run()
+    assert_synthetic_settings(app, plots, edited)
+    assert app.session_state["regression_results"] is edited_results
+
+    # The selected preset must not override the existing synthetic restoration.
+    sidebar_widget(app, "selectbox", "Dataset").select("Study Hours vs Exam Score").run()
+    assert_current_results(app, plots, "Study Hours vs Exam Score")
+    sidebar_widget(app, "selectbox", "Dataset").select("Synthetic").run()
+    assert_synthetic_settings(app, plots, edited)
+    restored_results = app.session_state["regression_results"]
+
+    sidebar_widget(app, "button", "Apply Preset").click().run()
+    assert_synthetic_settings(app, plots, expected)
+    assert app.session_state["regression_results"] is not restored_results
+
+    # Applying an unchanged case is also an explicit refresh, like Run Experiment.
+    reapplied_results = app.session_state["regression_results"]
+    sidebar_widget(app, "button", "Apply Preset").click().run()
+    assert_synthetic_settings(app, plots, expected)
+    assert app.session_state["regression_results"] is not reapplied_results
 
 
 def test_switching_refreshes_every_dataset_and_restores_synthetic(simulation):

@@ -10,7 +10,15 @@ from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.metrics import mean_squared_error, r2_score
 
 from modules.datasets import DATASETS, load_dataset
+from modules.presets import DEMONSTRATION_PRESETS
 from modules.quiz_data import PRETEST, POSTTEST
+from modules.presentation import render_theme
+from modules.playground import render_playground
+from modules.beginner_guide import render_beginner_guide, render_dataset_explanation, render_model_panels
+from modules.explanations import render_metric_interpretation, render_model_comparison
+from modules.experiment_guide import (
+    CONTROL_LABELS, mark_step, navigate_to, render_challenges, render_journey, render_progress
+)
 
 
 # ==================================================
@@ -23,11 +31,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("📈 Regression Virtual Lab")
-st.caption(
-    "Implement Linear, Polynomial, and Ridge Regression "
-    "and compare prediction accuracy and overfitting behavior."
-)
+render_theme()
 
 
 # ==================================================
@@ -40,12 +44,16 @@ section = st.sidebar.radio(
     "Select Section",
     [
         "Aim",
+        "Beginner Guide",
         "Theory",
         "Pre-test",
         "Procedure",
         "Simulation",
+        "Playground",
+        "Model Comparison",
         "Post-test"
-    ]
+    ],
+    key="navigation_section"
 )
 
 
@@ -55,6 +63,7 @@ section = st.sidebar.radio(
 
 def display_quiz(questions, quiz_key):
     st.subheader("Answer the following questions")
+    saved = st.session_state.get("quiz_results", {}).get(quiz_key)
 
     with st.form(key=f"{quiz_key}_form"):
         answers = {}
@@ -62,29 +71,43 @@ def display_quiz(questions, quiz_key):
         for i, question in enumerate(questions):
             st.markdown(f"**Q{i + 1}. {question['question']}**")
 
+            widget_key = f"{quiz_key}_q{i}"
+            if widget_key not in st.session_state:
+                st.session_state[widget_key] = saved["answers"][i] if saved else None
             answers[i] = st.radio(
                 "Choose your answer:",
                 question["options"],
                 index=None,
-                key=f"{quiz_key}_q{i}",
+                key=widget_key,
                 label_visibility="collapsed"
             )
 
         submitted = st.form_submit_button("Submit Quiz")
 
     if submitted:
-        score = 0
+        if any(answer is None for answer in answers.values()):
+            st.warning("Please answer every question before submitting. Your previous submitted result, if any, is unchanged.")
+        else:
+            saved = {
+                "answers": answers,
+                "score": sum(answers[i] == question["answer"] for i, question in enumerate(questions)),
+                "total": len(questions)
+            }
+            st.session_state["quiz_results"] = {**st.session_state.get("quiz_results", {}), quiz_key: saved}
+            if quiz_key in ("beginner", "posttest"):
+                mark_step("knowledge")
+
+    if saved:
         st.markdown("---")
-        st.subheader("Quiz Results")
+        st.subheader("Last submitted quiz results")
 
         for i, question in enumerate(questions):
-            user_answer = answers[i]
+            user_answer = saved["answers"][i]
             correct_answer = question["answer"]
 
             st.markdown(f"**Q{i + 1}. {question['question']}**")
 
             if user_answer == correct_answer:
-                score += 1
                 st.success("Correct!")
             else:
                 st.error("Incorrect.")
@@ -98,17 +121,39 @@ def display_quiz(questions, quiz_key):
                 )
             )
             st.write(f"**Correct answer:** {correct_answer}")
+            if "why" in question:
+                st.caption(question["why"])
             st.markdown("---")
 
-        st.subheader(f"Final Score: {score}/{len(questions)}")
+        st.subheader(f"Final Score: {saved['score']}/{saved['total']}")
 
         if questions:
-            st.progress(score / len(questions))
+            st.progress(saved["score"] / saved["total"])
+        st.caption("You can change your answers and submit again. Results persist while you navigate within this browser session.")
 
 
 # ==================================================
 # DATA GENERATION
 # ==================================================
+
+def apply_demonstration_preset():
+    """Set widget state in a callback, before the next run creates widgets."""
+    preset = DEMONSTRATION_PRESETS[st.session_state["demonstration_preset"]]
+    settings = preset["settings"]
+    st.session_state["dataset_selection"] = settings["dataset"]
+    synthetic_settings = {
+        setting: settings[setting] for setting in ["pattern", "n_samples", "noise"]
+    }
+    st.session_state["synthetic_settings"] = synthetic_settings
+    for setting, value in synthetic_settings.items():
+        st.session_state[f"synthetic_{setting}"] = value
+    st.session_state["polynomial_degree"] = settings["degree"]
+    st.session_state["ridge_alpha"] = settings["alpha"]
+    st.session_state["test_size"] = settings["test_size"]
+    # Explicit application also refreshes an already matching experiment.
+    st.session_state.pop("regression_settings", None)
+    st.session_state["preset_was_applied"] = True
+
 
 def generate_dataset(n_samples, noise, pattern):
     rng = np.random.default_rng(42)
@@ -192,7 +237,9 @@ def display_model_analysis(
     train_mse,
     test_mse,
     train_r2,
-    test_r2
+    test_r2,
+    target_label,
+    settings
 ):
     st.markdown(f"#### {model_name} — Model Analysis")
 
@@ -206,68 +253,13 @@ def display_model_analysis(
         st.metric("Testing MSE", f"{test_mse:.4f}")
         st.metric("Testing R²", f"{test_r2:.4f}")
 
-    # Compare training and testing errors
-    error_difference = test_mse - train_mse
-
-    # Testing error is considered significantly higher if
-    # it exceeds training error by more than 25%.
-    error_threshold = 0.25 * max(abs(train_mse), 1e-9)
-
-    st.markdown("---")
-    st.subheader("Result Analysis")
-
-    # UNDERFITTING:
-    # Both training and testing R² scores are low.
-    if train_r2 < 0.50 and test_r2 < 0.50:
-        st.warning("⚠️ Underfitting")
-
-        st.write(
-            "Both training and testing performance are poor. "
-            "The model may be too simple to learn the pattern "
-            "in the data."
-        )
-
-    # OVERFITTING:
-    # Testing error is significantly higher than training error.
-    elif error_difference > error_threshold:
-        st.error("🔴 Overfitting")
-
-        st.write(
-            "The testing error is significantly higher than the "
-            "training error. The model may have learned the training "
-            "data too closely and may not perform well on unseen data."
-        )
-
-    # GOOD FIT:
-    # Errors are close and both R² scores are reasonable.
-    elif (
-        abs(error_difference) <= error_threshold
-        and train_r2 >= 0.50
-        and test_r2 >= 0.50
-    ):
-        st.success("✅ Good Fit")
-
-        st.write(
-            "Training and testing errors are relatively close, "
-            "and both R² scores indicate a reasonable fit. "
-            "The model performs consistently on training and testing data."
-        )
-
-    # OTHER CASES
+    render_metric_interpretation(train_mse, test_mse, train_r2, test_r2, target_label)
+    if model_name == "Linear Regression":
+        st.info("Try next: if the dots form a curve, compare Polynomial at degree 2. Degree and Ridge alpha never change Linear's scores.")
+    elif model_name == "Polynomial Regression":
+        st.info(f"Current degree: {settings['degree']}. Try a lower degree if the curve chases individual dots. Ridge alpha does not affect this model.")
     else:
-        st.info("ℹ️ Needs Improvement")
-
-        st.write(
-            "The model does not clearly match the underfitting, "
-            "overfitting, or good-fit conditions. Try changing the "
-            "model type, polynomial degree, or Ridge alpha."
-        )
-
-    st.caption(
-        "These are simplified teaching rules. MSE depends on the "
-        "scale of the target values, so consider the R² scores and "
-        "fitted curve along with the errors."
-    )
+        st.info(f"Current degree: {settings['degree']}; alpha: {settings['alpha']:g}. Try changing alpha alone and watch testing error. Stronger penalties do not guarantee a better result.")
 
 
 # ==================================================
@@ -296,9 +288,18 @@ if section == "Aim":
     """)
 
 
+    render_journey()
+    st.button("Start with the Beginner Guide →", on_click=navigate_to, args=("Beginner Guide",))
+    st.button("Open Playground →", on_click=navigate_to, args=("Playground",))
+
+
 # ==================================================
-# THEORY
+# BEGINNER GUIDE AND THEORY
 # ==================================================
+
+elif section == "Beginner Guide":
+    render_beginner_guide(display_quiz)
+
 
 elif section == "Theory":
 
@@ -322,7 +323,8 @@ elif section == "Theory":
 
     st.write(
         "Polynomial Regression adds powers of the input to represent "
-        "curved relationships."
+        "curved relationships. Think of degree as the available bending "
+        "tools: degree 1 is a line and degree 2 adds x²."
     )
 
     st.latex(r"y = b_0 + b_1x + b_2x^2 + \cdots + b_dx^d")
@@ -346,8 +348,18 @@ elif section == "Theory":
 
     st.write(
         "The regularization parameter alpha controls the strength "
-        "of the penalty. Larger values apply stronger regularization."
+        "of the penalty. Larger values apply stronger regularization. "
+        "In this lab Ridge also uses polynomial features: degree changes "
+        "both Polynomial and Ridge; alpha changes Ridge only. "
+        "Neither control changes Linear Regression."
     )
+    st.subheader("Visual example · a ruler versus a curve")
+    example_x = np.linspace(-3, 3, 61)
+    st.line_chart(pd.DataFrame({
+        "X": example_x, "Straight line": 2 * example_x + 1,
+        "Quadratic curve": example_x**2 + 2 * example_x + 1
+    }).set_index("X"))
+    st.caption("Illustrative equations, not fitted experiment results. A straight line cannot follow every curved pattern; Ridge can use curved features while penalizing coefficients.")
 
     st.subheader("4. Evaluation Metrics")
 
@@ -355,7 +367,11 @@ elif section == "Theory":
     - **Mean Squared Error (MSE):** Measures squared prediction errors.
       Lower is generally better.
     - **R² Score:** Measures how much variation in the target is
-      explained by the model. Values closer to 1 are generally better.
+      explained by the model. 1 is perfect; 0 matches predicting that
+      evaluation set's average; a negative value is worse than that reference.
+      R² is not classification accuracy.
+    - **Training vs testing:** Training is the practice sheet; testing is
+      the unseen exam. Check testing performance, not training error alone.
     """)
 
     st.subheader("5. Overfitting and Underfitting")
@@ -392,26 +408,40 @@ elif section == "Pre-test":
 elif section == "Procedure":
 
     st.header("Procedure")
+    render_journey()
 
     st.markdown("""
-    1. Open the Simulation section.
-    2. Choose a dataset in **Experiment Settings**: Synthetic, Salary vs
+    1. New to regression? Start with **Beginner Guide** and its short quiz,
+       then open the Simulation section.
+    2. Optionally choose a **Demonstration Preset** in **Experiment Settings**
+       and click **Apply Preset** for a linear, curved, or overfitting example.
+       Selecting a preset alone changes nothing; after applying, you can tweak
+       all settings manually or apply the preset again to restore its values.
+    3. Choose a dataset in **Experiment Settings**: Synthetic, Salary vs
        Years of Experience, Study Hours vs Exam Score, or Diabetes BMI vs
-       Disease Progression. Read its description, units, and source.
-    3. For **Synthetic** only, select Linear, Curved, or S-shaped and set
+       Disease Progression. Click **Show Dataset Explanation** to inspect
+       actual rows, identify X and Y, and read the units and source.
+    4. For **Synthetic** only, select Linear, Curved, or S-shaped and set
        the number of samples and noise level. Real datasets use all their
        original rows without added noise or generated samples.
-    4. Select a polynomial degree.
-    5. Set the Ridge regularization parameter alpha.
-    6. Choose the testing-data percentage.
-    7. Results update automatically when the dataset or settings change.
+    5. Open the model explanation panels, then select a polynomial degree.
+    6. Set the Ridge regularization parameter alpha.
+    7. Choose the testing-data percentage.
+    8. Results update automatically when the dataset or settings change.
        Click **Run Experiment** to rerun the current experiment.
-    8. Inspect the fitted curves and evaluation metrics.
-    9. Compare training and testing errors for each model.
-    10. Repeat with different settings and datasets. Diabetes uses only
+    9. Inspect the fitted curves and evaluation metrics.
+    10. Read the automatic score interpretations. Open **Model Comparison**
+        to compare training and testing errors on the same saved split.
+    11. Repeat with different settings and datasets. Diabetes uses only
         standardized BMI to predict quantitative disease progression one
         year after baseline; BMI alone is not expected to give a strong fit.
+    12. Try an independent challenge below, then take the Post-test.
+    13. For free exploration, open **Playground**: all controls appear above
+        the live results. Change one parameter and watch the curves and
+        score deltas below. This never overwrites your Simulation experiment.
     """)
+    st.subheader("Guided experiments and independent challenges")
+    render_challenges("procedure")
 
 
 # ==================================================
@@ -426,15 +456,40 @@ elif section == "Simulation":
         "Adjust parameters to observe fitted curves, evaluation metrics, "
         "and model analysis."
     )
+    st.info("New here? Follow Parts A–D below. Results update automatically; Run Experiment explicitly reruns the current settings. Use Beginner Guide for X, Y and prediction basics.")
 
     with st.sidebar:
 
         st.subheader("Experiment Settings")
+        st.caption("Part C · Choose one change at a time, then inspect the curve and testing scores.")
+        # Widget values are cleaned up by Streamlit when navigating to another page.
+        # Restore the last experiment rather than silently replacing it with defaults.
+        last_settings = st.session_state.get("regression_settings", {})
+        for key, value in {
+            "dataset_selection": last_settings.get("dataset", "Synthetic"),
+            "polynomial_degree": last_settings.get("degree", 3),
+            "ridge_alpha": last_settings.get("alpha", 1.0),
+            "test_size": last_settings.get("test_size", 20)
+        }.items():
+            st.session_state.setdefault(key, value)
+
+        preset_name = st.selectbox(
+            "Demonstration Preset",
+            list(DEMONSTRATION_PRESETS),
+            key="demonstration_preset"
+        )
+        st.caption(DEMONSTRATION_PRESETS[preset_name]["description"])
+        st.caption(
+            "Optional: click Apply Preset to load this case, then tweak any "
+            "setting manually. Selecting a preset alone does not change settings."
+        )
+        st.button("Apply Preset", on_click=apply_demonstration_preset)
 
         dataset_name = st.selectbox(
             "Dataset",
             list(DATASETS),
-            key="dataset_selection"
+            key="dataset_selection",
+            help="All models use the chosen dataset. Curated datasets load all original rows offline, without generated noise."
         )
 
         pattern = n_samples = noise = None
@@ -459,19 +514,23 @@ elif section == "Simulation":
             )
 
             n_samples = st.slider(
-                "Number of Samples",
+                CONTROL_LABELS["Number of Samples"],
                 min_value=50,
                 max_value=300,
                 step=10,
-                key="synthetic_n_samples"
+                key="synthetic_n_samples",
+                help="Total examples before splitting, not just training examples. Affects all three models."
             )
+            st.caption("More examples provide more evidence. Some are held out for testing; scores need not improve on every split.")
 
             noise = st.slider(
-                "Noise Level",
+                CONTROL_LABELS["Noise Level"],
                 min_value=0,
                 max_value=50,
-                key="synthetic_noise"
+                key="synthetic_noise",
+                help="Scatters targets for every model. Noise standard deviation = this value ÷ 10. Synthetic only."
             )
+            st.caption("Noise scatters the dots around the true pattern. It can change all four scores for every model.")
 
             st.session_state["synthetic_settings"] = {
                 "pattern": pattern,
@@ -479,27 +538,38 @@ elif section == "Simulation":
                 "noise": noise
             }
 
+        for key, default in {
+            "polynomial_degree": 3, "ridge_alpha": 1.0, "test_size": 20
+        }.items():
+            st.session_state.setdefault(key, default)
+
         degree = st.slider(
-            "Polynomial Degree",
+            CONTROL_LABELS["Polynomial Degree"],
             min_value=1,
             max_value=12,
-            value=3
+            key="polynomial_degree",
+            help="Highest power of X. Changes Polynomial and Ridge, never Linear. Degree 1 is a line; degree 2 adds x²."
         )
+        st.caption("Extra flexibility may follow a curve or chase noise. Watch testing error as well as training error.")
 
         alpha = st.slider(
-            "Ridge Alpha",
+            CONTROL_LABELS["Ridge Alpha"],
             min_value=0.01,
             max_value=100.0,
-            value=1.0,
-            step=0.1
+            step=0.1,
+            key="ridge_alpha",
+            help="Only Ridge uses this coefficient penalty. Polynomial and Linear ignore alpha."
         )
+        st.caption("Higher alpha restrains large coefficients more strongly. Too much restraint can miss the pattern.")
 
         test_size = st.slider(
-            "Testing Data (%)",
+            CONTROL_LABELS["Testing Data (%)"],
             min_value=10,
             max_value=40,
-            value=20
+            key="test_size",
+            help="The unseen exam. More testing data leaves fewer training observations and changes all models' evaluation sets."
         )
+        st.caption("Training = practice; testing = an unseen exam. Changing this split can change all four scores for every model.")
 
         run_button = st.button(
             "Run Experiment",
@@ -585,10 +655,15 @@ elif section == "Simulation":
 
         st.session_state["regression_settings"] = current_settings
 
+    preset_was_applied = st.session_state.pop("preset_was_applied", False)
+    if run_button or preset_was_applied:
+        mark_step("experiment")
+
     results = st.session_state["regression_results"]
     data = st.session_state["regression_data"]
 
     dataset_info = DATASETS[dataset_name]
+    st.subheader("Part A · Understand your dataset")
     st.subheader(f"Dataset: {dataset_name}")
     st.write(dataset_info["description"])
     st.caption(
@@ -605,6 +680,12 @@ elif section == "Simulation":
             f"({dataset_info['source_url']})"
         )
 
+    render_dataset_explanation(dataset_name, data)
+    render_model_panels()
+    with st.expander("Part C · What should I try first?"):
+        render_challenges("simulation")
+
+    st.subheader("Part D · Understand your results")
     # --------------------------------------------------
     # FITTED CURVE GRAPH
     # --------------------------------------------------
@@ -705,7 +786,9 @@ elif section == "Simulation":
                 train_mse=result["Train MSE"],
                 test_mse=result["Test MSE"],
                 train_r2=result["Train R²"],
-                test_r2=result["Test R²"]
+                test_r2=result["Test R²"],
+                target_label=data["y_label"],
+                settings=current_settings
             )
 
     # --------------------------------------------------
@@ -725,8 +808,16 @@ elif section == "Simulation":
 
 
 # ==================================================
-# POST-TEST
+# MODEL COMPARISON AND POST-TEST
 # ==================================================
+
+elif section == "Playground":
+    render_playground(generate_dataset, build_model, evaluate_model)
+
+
+elif section == "Model Comparison":
+    render_model_comparison()
+
 
 elif section == "Post-test":
 
@@ -745,4 +836,6 @@ elif section == "Post-test":
 # ==================================================
 
 st.sidebar.markdown("---")
+with st.sidebar:
+    render_progress()
 st.sidebar.caption("Regression Virtual Lab")
