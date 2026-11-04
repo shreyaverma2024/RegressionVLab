@@ -19,7 +19,7 @@ h3 { font-size: 1.18rem !important; }
 p, li, label { line-height: 1.65; }
 [data-testid="stCaptionContainer"] { color: var(--muted); }
 .lab-hero {
-    position: relative; overflow: hidden; padding: 2.6rem 2.8rem; border: 1px solid var(--edge);
+    position: relative; overflow: hidden; padding: 1.2rem 2.8rem 2.6rem; border: 1px solid var(--edge);
     border-radius: 28px; margin-bottom: 1.4rem;
     background: linear-gradient(115deg, rgba(255,255,255,.80), rgba(255,255,255,.36));
     backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
@@ -67,7 +67,7 @@ button:focus-visible, a:focus-visible { outline: 3px solid #8056cd !important; o
 hr { border-color: rgba(112,87,156,.15); }
 @media (max-width: 700px) {
     [data-testid="stMainBlockContainer"] { padding: 1.3rem 1rem 3rem; }
-    .lab-hero { padding: 1.8rem 1.3rem; border-radius: 22px; }
+    .lab-hero { padding: 1rem 1.3rem 1.8rem; border-radius: 22px; }
     .lab-hero::after { opacity: .45; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
